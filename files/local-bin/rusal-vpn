@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Подключение к корпоративному VPN РУСАЛа через USB-токен (Cisco AnyConnect).
+# В туннель уходит только 10.0.0.0/8, маршрут по умолчанию не меняется.
+#
+#   rusal-vpn            подключиться в фоне (терминал можно закрыть)
+#   rusal-vpn --fg       подключиться в переднем плане, Ctrl+C для отключения
+#   rusal-vpn --check    только проверить токен/PIN/сервер, без создания tun
+#   rusal-vpn status     состояние туннеля
+#   rusal-vpn down       отключиться
+set -euo pipefail
+
+VPN_HOST="${VPN_HOST:-sib02.vpn.rusal.com}"
+VPN_IP="${VPN_IP:-}"
+SERVER_PIN="${SERVER_PIN:-pin-sha256:MQO2vG9o+VZVQy76UjNH1LWNsfCii5ZwxqnjyeF45Yg=}"
+CERT_URI="${CERT_URI:-}"
+VPN_SCRIPT="${VPN_SCRIPT:-$HOME/.local/share/rusal-vpn/vpnc-script}"
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rusal-vpn"
+LOG="$STATE_DIR/openconnect.log"
+PIDFILE="/run/rusal-vpn.pid"
+
+MODULES=(
+  /usr/lib/libjcPKCS11-2.so
+  /usr/lib/pkcs11/libeToken.so
+)
+
+die() { printf 'rusal-vpn: %s\n' "$*" >&2; exit 1; }
+tun_up() { ip -4 addr show tun0 2>/dev/null | grep -q 'inet '; }
+
+case "${1:-}" in
+  ""|--bg)   MODE=bg ;;
+  --fg)      MODE=fg ;;
+  --check)   MODE=check ;;
+  status)    MODE=status ;;
+  down)      MODE=down ;;
+  -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+  *)         die "неизвестный аргумент: $1" ;;
+esac
+
+if [[ $MODE == status ]]; then
+  if tun_up; then
+    printf 'VPN: %s\n' "$(ip -4 -br addr show tun0 | awk '{print $3}')"
+  else
+    echo 'VPN: отключён'
+  fi
+  exit 0
+fi
+
+if [[ $MODE == down ]]; then
+  if pgrep -x openconnect >/dev/null; then
+    sudo pkill -TERM -x openconnect
+    for _ in $(seq 1 20); do
+      pgrep -x openconnect >/dev/null || break
+      sleep 0.3
+    done
+    if pgrep -x openconnect >/dev/null; then
+      sudo pkill -KILL -x openconnect
+    fi
+  fi
+  rm -f "$STATE_DIR/pid" "$PIDFILE"
+  if tun_up; then
+    echo 'VPN: отключить не удалось' >&2
+    exit 1
+  fi
+  echo 'VPN: отключён'
+  exit 0
+fi
+
+command -v openconnect >/dev/null || die "не установлен openconnect (pacman -S openconnect)"
+command -v pkcs11-tool >/dev/null || die "не установлен pkcs11-tool (pacman -S opensc)"
+
+# --- поиск сертификата на токене ---
+if [[ -z $CERT_URI ]]; then
+  found=()
+  declare -A seen=()
+  for m in "${MODULES[@]}"; do
+    [[ -r $m ]] || continue
+    while IFS= read -r uri; do
+      [[ -n $uri ]] || continue
+      id=""
+      IFS=';' read -ra parts <<< "$uri"
+      for p in "${parts[@]}"; do
+        [[ $p == id=* ]] && id="${p#id=}"
+      done
+      id="${id,,}"
+      [[ -n ${seen[$id]:-} ]] && continue
+      seen[$id]=1
+      found+=("$uri")
+    done < <(pkcs11-tool --module "$m" --list-objects --type cert 2>/dev/null |
+               sed -n 's/^[[:space:]]*uri:[[:space:]]*//p')
+  done
+
+  [[ ${#found[@]} -gt 0 ]] || die "сертификат на токене не найден.
+Проверь, что токен вставлен и работает pcscd:
+  systemctl status pcscd
+  p11tool --list-tokens"
+
+  if [[ ${#found[@]} -gt 1 ]]; then
+    printf 'Найдено несколько сертификатов, укажи нужный через CERT_URI:\n' >&2
+    printf '  %s\n' "${found[@]}" >&2
+    exit 1
+  fi
+
+  CERT_URI="${found[0]}"
+fi
+
+base="${CERT_URI%;type=cert}"
+base="${base%;object=*}"
+CERT_URI="$base;object-type=cert"
+KEY_URI="$base;object-type=private"
+
+if [[ -z $VPN_IP ]]; then
+  VPN_IP=$(getent ahostsv4 "$VPN_HOST" | awk 'NR==1{print $1}')
+  [[ -n $VPN_IP ]] || die "не удалось разрешить $VPN_HOST"
+fi
+
+OC_ARGS=(--protocol=anyconnect
+         --resolve="${VPN_HOST}:${VPN_IP}"
+         --no-dtls
+         --servercert "$SERVER_PIN"
+         -c "$CERT_URI" -k "$KEY_URI")
+
+if [[ $MODE == check ]]; then
+  exec openconnect --authenticate "${OC_ARGS[@]}" "$VPN_HOST"
+fi
+
+if [[ $MODE == fg ]]; then
+  [[ -x $VPN_SCRIPT ]] || die "не найден $VPN_SCRIPT"
+  exec sudo openconnect "${OC_ARGS[@]}" --script "$VPN_SCRIPT" "$VPN_HOST"
+fi
+
+# --- фоновый режим ---
+[[ -x $VPN_SCRIPT ]] || die "не найден $VPN_SCRIPT (адаптированный vpnc-script)"
+
+if tun_up; then exit 0; fi   # уже подключено
+
+mkdir -p "$STATE_DIR"
+: >"$LOG"
+
+sudo -v || die 'нужны права root'
+
+read -rsp 'PIN токена: ' pin
+echo >&2
+[[ -n $pin ]] || die 'PIN не введён'
+
+printf '%s\n%s\n' "$pin" "$pin" |
+  sudo -n setsid openconnect "${OC_ARGS[@]}" \
+    --script "$VPN_SCRIPT" \
+    --non-inter --passwd-on-stdin \
+    "$VPN_HOST" >>"$LOG" 2>&1 &
+unset pin
+
+for _ in $(seq 1 20); do
+  pid=$(pgrep -n -x openconnect || true)
+  if [[ -n $pid ]]; then echo "$pid" >"$STATE_DIR/pid"; break; fi
+  sleep 0.2
+done
+
+for _ in $(seq 1 45); do
+  if tun_up; then exit 0; fi
+  pgrep -x openconnect >/dev/null || break
+  sleep 1
+done
+
+if tun_up; then exit 0; fi
+
+printf 'rusal-vpn: не удалось поднять туннель, лог %s:\n' "$LOG" >&2
+tail -n 5 "$LOG" >&2
+exit 1

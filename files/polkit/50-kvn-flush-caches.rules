@@ -1,0 +1,14 @@
+// kvn-tui: разрешить сброс DNS-кэша без пароля членам группы kvn-tui.
+//
+// kvn при смене DNS вызывает FlushCaches у systemd-resolved, а этот action
+// (org.freedesktop.resolve1.flush-caches) в правило самого kvn
+// (49-kvn-tui.rules) не входит — поэтому всплывает диалог
+// «Authentication is required to flush DNS caches».
+//
+// Ставится скриптом install-kvn-vpn.sh из CaelestiaPatchForHuawei.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.resolve1.flush-caches" &&
+        subject.isInGroup("kvn-tui")) {
+        return polkit.Result.YES;
+    }
+});

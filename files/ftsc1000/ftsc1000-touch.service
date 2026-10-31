@@ -1,0 +1,14 @@
+[Unit]
+Description=Re-initialize FocalTech FTSC1000 touchscreen (Huawei MateBook 14)
+Documentation=https://github.com/ninetofivedev/touchscreen-fix-for-matebook14-linux
+After=systemd-modules-load.service local-fs.target
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/ftsc1000-touch
+ExecStart=/usr/local/bin/ftsc1000-touch-init.sh
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

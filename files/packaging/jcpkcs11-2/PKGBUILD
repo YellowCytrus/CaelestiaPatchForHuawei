@@ -1,0 +1,33 @@
+# Maintainer: local
+# PKCS#11-модуль JaCarta из официального «Единого Клиента JaCarta» (Aladdin R.D.).
+# Ставится как отдельный пакет, чтобы файлы в /usr/lib были под управлением pacman.
+pkgname=jcpkcs11-2
+pkgver=2.11.4.1231
+pkgrel=1
+pkgdesc='PKCS#11 module for JaCarta tokens (Aladdin R.D.), extracted from JaCarta Unified Client'
+arch=(x86_64)
+url='https://www.aladdin-rd.ru/support/downloads/jacarta/'
+license=(custom)
+depends=(pcsclite glibc gcc-libs)
+options=(!strip !debug)
+source=('https://www.aladdin-rd.ru/upload/downloads/JaCarta_UC/jacarta-3.3.6/lunix/distributions/jacartauc_3.3.6.3921_rpm_x64.tgz')
+md5sums=('92b027467ae5f06a0948168419b92d3c')
+
+package() {
+  bsdtar -xf "$srcdir"/jcpkcs11-2_2.11.4.1231_x64.rpm -C "$pkgdir"
+
+  # Arch печатает /usr/lib64 как симлинк на /usr/lib
+  mv "$pkgdir"/usr/lib64 "$pkgdir"/usr/lib
+
+  # Хелперы и Debian-специфичный polkit-rule не нужны
+  rm -rf "$pkgdir"/tmp "$pkgdir"/etc
+  rm -f "$pkgdir"/usr/lib/jcverify "$pkgdir"/usr/lib/jcverify.txt "$pkgdir"/usr/lib/jckt2.txt
+
+  # Symlink для загрузки модуля по стабильному имени
+  ln -s libjcPKCS11-2.so.2.11.4 "$pkgdir"/usr/lib/libjcPKCS11-2.so
+
+  # Регистрация модуля в p11-kit (через него ищет токены openconnect)
+  install -Dm644 /dev/stdin "$pkgdir"/etc/pkcs11/modules/jacarta.module <<'EOF'
+module: /usr/lib/libjcPKCS11-2.so
+EOF
+}

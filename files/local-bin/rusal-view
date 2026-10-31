@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Рабочий стол RUSAL через Omnissa Horizon.
+#   rusal-view        — Horizon Client
+#   rusal-view --web  — тот же портал в браузере (HTML Access)
+set -euo pipefail
+
+SERVER="${HORIZON_SERVER:-kraz-s-view01.hq.root.ad}"
+WEB="https://${SERVER}/portal/webclient/index.html"
+
+if [[ ${1:-} == --web ]] || ! command -v vmware-view >/dev/null; then
+  exec xdg-open "$WEB"
+fi
+
+exec vmware-view --serverURL="$SERVER" "$@"

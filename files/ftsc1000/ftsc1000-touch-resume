@@ -1,0 +1,6 @@
+#!/bin/bash
+# systemd-sleep hook: после выхода из сна тачскрин часто теряет синхронизацию
+# (та же гонка I2C, что и при загрузке). Переинициализируем его.
+case "${1:-}" in
+    post) /usr/local/bin/ftsc1000-touch-init.sh ;;
+esac

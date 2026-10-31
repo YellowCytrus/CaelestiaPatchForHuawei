@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Одна команда: поднять VPN (если ещё не поднят) и открыть рабочий стол Horizon.
+# Терминал можно закрыть — VPN и клиент живут отдельно от него.
+#
+#   rusal          подключить VPN и открыть Horizon
+#   rusal view     открыть Horizon (VPN поднимет, если нужно; уже открытое — на передний план)
+#   rusal vpn      только VPN
+#   rusal down     отключить VPN
+#   rusal status   состояние
+set -euo pipefail
+
+SERVER="${HORIZON_SERVER:-kraz-s-view01.hq.root.ad}"
+VPN="$HOME/.local/bin/rusal-vpn"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/rusal-vpn"
+LOG="$STATE/rusal.log"
+VIEWLOG="$STATE/view.log"
+
+case "${1:-}" in
+  down)      exec "$VPN" down ;;
+  status)    exec "$VPN" status ;;
+  vpn)       exec "$VPN" ;;
+  view|"")   ;;
+  -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+  *)         echo "rusal: неизвестный аргумент: $1" >&2; exit 2 ;;
+esac
+
+[[ -x $VPN ]] || { echo "rusal: нет $VPN" >&2; exit 1; }
+
+mkdir -p "$STATE"
+log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >>"$LOG"; }
+log "start (${1:-default})"
+
+"$VPN"
+log "vpn ok"
+
+if ! getent hosts "$SERVER" >/dev/null; then
+  log "no dns for $SERVER"
+  printf 'rusal: имя %s не резолвится\n' "$SERVER" >&2
+  exit 1
+fi
+
+# Клиент уже открыт — поднять его окно вместо второго экземпляра
+if pgrep -f '/vmware/view/bin/vmware-view' >/dev/null; then
+  for _ in $(seq 1 15); do
+    cls=$(hyprctl clients 2>/dev/null |
+            sed -n 's/^[[:space:]]*class:[[:space:]]*//p' |
+            grep -iE 'vmware|horizon' | head -1 || true)
+    if [[ -n ${cls:-} ]]; then
+      log "focus existing window: $cls"
+      hyprctl eval "hl.dispatch(hl.dsp.focus({window=\"class:^${cls}$\"}))" >>"$LOG" 2>&1 || true
+      exit 0
+    fi
+    sleep 0.2
+  done
+  log "client already running (no window found)"
+  exit 0
+fi
+
+log "launch client: $SERVER"
+: >"$VIEWLOG"
+setsid -f sh -c "exec vmware-view --serverURL='$SERVER' >>'$VIEWLOG' 2>&1"
+log "client spawned"
+
+for _ in $(seq 1 50); do
+  if pgrep -f '/vmware/view/bin/vmware-view' >/dev/null; then
+    log "client running"
+    # поднять окно, даже если клиент открылся на другом рабочем столе
+    for _ in $(seq 1 25); do
+      cls=$(hyprctl clients 2>/dev/null |
+              sed -n 's/^[[:space:]]*class:[[:space:]]*//p' |
+              grep -iE 'vmware|horizon' | head -1 || true)
+      if [[ -n ${cls:-} ]]; then
+        hyprctl eval "hl.dispatch(hl.dsp.focus({window=\"class:^${cls}$\"}))" >>"$LOG" 2>&1 || true
+        break
+      fi
+      sleep 0.2
+    done
+    exit 0
+  fi
+  sleep 0.2
+done
+
+log "client failed to start"
+printf 'rusal: Horizon Client не запустился, лог %s:\n' "$VIEWLOG" >&2
+tail -n 5 "$VIEWLOG" >&2
+exit 1

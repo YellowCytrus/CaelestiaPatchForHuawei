@@ -1,0 +1,16 @@
+#!/bin/bash
+# Super+Shift+V: вкл/выкл VPN через kvn + уведомление о статусе.
+# Ставится скриптом install-kvn-vpn.sh в ~/.local/bin/kvn-toggle.
+set -u
+KVN=/usr/bin/kvn
+
+if [[ ! -x $KVN ]]; then
+    notify-send -a "VPN" -i network-vpn -u critical "kvn не найден" 2>/dev/null || true
+    exit 1
+fi
+
+err=$("$KVN" toggle 2>&1) || true
+sleep 1
+status=$("$KVN" status 2>&1 | head -1)
+[ -n "$status" ] || status=${err:-"нет ответа от kvn"}
+notify-send -a "VPN" -i network-vpn "$status" 2>/dev/null || true

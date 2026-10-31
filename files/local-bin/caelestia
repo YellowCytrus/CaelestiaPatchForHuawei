@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# caelestia-clipboard-patch: route `caelestia clipboard` to the Quickshell picker.
+# Route `caelestia clipboard` to the Quickshell picker, with fuzzel fallback.
+set -u
+
+if [ "${1-}" = "clipboard" ]; then
+    shift
+
+    case "${1-}" in
+        -d | --delete)
+            if /usr/bin/caelestia shell clipboard openDelete >/dev/null 2>&1; then
+                exit 0
+            fi
+            ;;
+        "")
+            if /usr/bin/caelestia shell clipboard open >/dev/null 2>&1; then
+                exit 0
+            fi
+            ;;
+        -h | --help)
+            exec /usr/bin/caelestia clipboard "$@"
+            ;;
+    esac
+
+    exec /usr/bin/caelestia clipboard "$@"
+fi
+
+exec /usr/bin/caelestia "$@"
