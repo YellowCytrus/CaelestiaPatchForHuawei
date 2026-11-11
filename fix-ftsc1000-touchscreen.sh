@@ -12,11 +12,13 @@
 # достаточно времени на старт контроллера. i2c-hid опрашивает его слишком
 # рано, обмен по I2C рвётся, устройство остаётся полуинициализированным и не
 # присылает события. Повторный probe через несколько секунд после загрузки
-# работает, поэтому скрипт ставит oneshot-сервис с задержкой и ретраями.
+# работает. Скрипт ставит сервис, который переподключает только тачскрин,
+# удерживает шину I2C включённой и повторяет попытки, пока probe не пройдёт
+# без ошибок.
 #
 # Использование:
-#   ./fix-ftsc1000-touchscreen.sh                  # установить автозапуск
-#   ./fix-ftsc1000-touchscreen.sh --with-suspend   # + переинициализация после сна
+#   ./fix-ftsc1000-touchscreen.sh                  # автозапуск + хук сна
+#   ./fix-ftsc1000-touchscreen.sh --no-suspend     # без хука сна
 #   ./fix-ftsc1000-touchscreen.sh --check          # только диагностика
 #   ./fix-ftsc1000-touchscreen.sh --remove         # удалить патч
 #   ./fix-ftsc1000-touchscreen.sh --yes            # без вопросов
@@ -34,7 +36,7 @@ SLEEP_HOOK_DST="/usr/lib/systemd/system-sleep/ftsc1000-touch"
 DEFAULTS_DST="/etc/default/ftsc1000-touch"
 
 MODE="install"
-WITH_SUSPEND=0
+WITH_SUSPEND=1
 ASSUME_YES=0
 
 bold() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --check)        MODE="check" ;;
         --remove)       MODE="remove" ;;
         --with-suspend) WITH_SUSPEND=1 ;;
+        --no-suspend)   WITH_SUSPEND=0 ;;
         --yes|-y)       ASSUME_YES=1 ;;
         -h|--help)      usage; exit 0 ;;
         *)              die "неизвестный аргумент: $1 (см. --help)" ;;
@@ -165,6 +168,20 @@ verify() {
         warn "в журнале текущей загрузки нет записей сервиса"
     fi
 
+    local pci_power bus_power svc_state
+    pci_power="$(cat /sys/bus/pci/devices/0000:00:15.1/power/control 2>/dev/null || true)"
+    bus_power="$(cat /sys/bus/platform/devices/i2c_designware.1/power/control 2>/dev/null || true)"
+    if [[ "$pci_power" == on && "$bus_power" == on ]]; then
+        ok "шина I2C удерживается включённой"
+    else
+        warn "шина может уходить в runtime-suspend (pci=${pci_power:-?}, bus=${bus_power:-?})"
+    fi
+
+    svc_state="$(systemctl is-active "$UNIT" 2>/dev/null || true)"
+    if [[ "$svc_state" == activating || "$svc_state" == active ]]; then
+        ok "сервис сейчас выполняет попытки инициализации"
+    fi
+
     irq="$(irq_counter)"
     if [[ -n "$irq" ]]; then
         ok "прерываний контроллера с загрузки: $irq (при касаниях должно расти)"
@@ -211,7 +228,7 @@ install_patch() {
         [[ -f "$FILES_DIR/$f" ]] || die "нет файла $FILES_DIR/$f"
     done
 
-    confirm "Поставить сервис автозапуска? Понадобится sudo; тачпад на пару секунд отключится." ||
+    confirm "Поставить сервис автозапуска? Понадобится sudo; тачскрин на несколько секунд пропадёт из системы." ||
         { echo "Отменено."; exit 0; }
 
     as_root install -m755 "$FILES_DIR/ftsc1000-touch-init.sh" "$INIT_DST"
@@ -225,10 +242,12 @@ install_patch() {
     if [[ ! -f "$DEFAULTS_DST" ]]; then
         printf '%s\n' \
             '# Настройки переинициализации тачскрина FTSC1000.' \
-            '# FTSC1000_ATTEMPTS   — сколько раз пробовать (по умолчанию 3)' \
+            '# FTSC1000_ATTEMPTS   — сколько раз пробовать (по умолчанию 5)' \
             '# FTSC1000_BASE_DELAY — стартовая задержка в секундах (по умолчанию 2)' \
-            'FTSC1000_ATTEMPTS=3' \
-            'FTSC1000_BASE_DELAY=2' |
+            '# FTSC1000_MAX_DELAY  — максимальная задержка между попытками (30)' \
+            'FTSC1000_ATTEMPTS=5' \
+            'FTSC1000_BASE_DELAY=2' \
+            'FTSC1000_MAX_DELAY=30' |
             as_root tee "$DEFAULTS_DST" >/dev/null
         ok "настройки: $DEFAULTS_DST"
     fi
@@ -237,13 +256,23 @@ install_patch() {
     as_root systemctl enable --now "$UNIT"
     ok "сервис установлен и запущен"
 
+    bold "Жду инициализацию (до 60 с)"
+    local waited=0 last=""
+    while (( waited < 60 )); do
+        last="$(last_service_log)"
+        [[ "$last" == *"initialized"* ]] && break
+        [[ "$last" == *"did not initialize"* ]] && break
+        sleep 2
+        waited=$((waited + 2))
+    done
+
     verify || true
 
     printf '\nДальше:\n'
     printf '  1. Потрогай экран — касания должны работать уже сейчас.\n'
     printf '  2. Перезагрузись и проверь ещё раз: ./%s --check\n' "$(basename "$0")"
     printf '  3. Журнал: journalctl -b -t ftsc1000-touch\n\n'
-    printf 'Настроить задержку: %s (FTSC1000_ATTEMPTS, FTSC1000_BASE_DELAY)\n' "$DEFAULTS_DST"
+    printf 'Настроить задержку: %s (FTSC1000_ATTEMPTS, FTSC1000_BASE_DELAY, FTSC1000_MAX_DELAY)\n' "$DEFAULTS_DST"
     printf 'Удалить: ./%s --remove\n' "$(basename "$0")"
 }
 
@@ -258,7 +287,7 @@ remove_patch() {
     as_root systemctl daemon-reload
     ok "сервис, скрипт и хук сна удалены"
 
-    warn "модуль $MODULE остаётся загруженным: тачскрин продолжит работать до перезагрузки"
+    warn "переподключение больше не выполняется: тачскрин продолжит работать до перезагрузки"
     echo "После перезагрузки поведение вернётся к стоковому (тачскрин снова может не работать)."
 }
 
